@@ -1,8 +1,8 @@
 {
-  "name": "aztec-voice-red",
+  "name": "voice8a",
   "private": true,
-  "version": "1.9.5",
-  "description": "Aztec Voice Edición Roja — App de escritorio para Windows",
+  "version": "1.9.6",
+  "description": "Voice8a — App de escritorio para Windows",
   "author": "ingea8a",
   "main": "electron/main.cjs",
   "type": "module",
@@ -30,8 +30,8 @@
     "vite": "^8.3.6"
   },
   "build": {
-    "appId": "com.aztecvoice.red",
-    "productName": "Aztec Voice Red",
+    "appId": "com.voice8a.app",
+    "productName": "Voice8a",
     "directories": {
       "output": "release"
     },
@@ -51,14 +51,14 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "public/assets/aztec_logo_icon.png"
+      "icon": "public/assets/voice8a_logo_icon.png"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Aztec Voice Red"
+      "shortcutName": "Voice8a"
     }
   }
 }

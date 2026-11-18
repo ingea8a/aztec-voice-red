@@ -23,7 +23,7 @@ import {
 
 declare global {
   interface Window {
-    aztecDesktop?: {
+    voice8aDesktop?: {
       isElectron?: boolean;
       onToggleDictation: (cb: () => void) => () => void;
       getShortcutStatus: () => Promise<{ ok: boolean; shortcut: string }>;
@@ -99,7 +99,7 @@ const INITIAL_HISTORY: HistoryEntry[] = [
 ];
 
 const INITIAL_DICTIONARY: DictionaryEntry[] = [
-  { id: 'd-1', term: 'Aztec Voice', replacement: 'Aztec Voice', note: 'Nombre de producto' },
+  { id: 'd-1', term: 'Voice8a', replacement: 'Voice8a', note: 'Nombre de producto' },
   { id: 'd-2', term: 'Whisper', replacement: 'Whisper Large v3', note: 'Modelo de voz' },
 ];
 
@@ -182,22 +182,22 @@ export function App() {
 
   // Global shortcut state
   const [shortcut, setShortcut] = useState(() => {
-    return localStorage.getItem('aztec_red_shortcut') || 'CommandOrControl+Space';
+    return localStorage.getItem('voice8a_shortcut') || 'CommandOrControl+Space';
   });
   const [shortcutOk, setShortcutOk] = useState(true);
   const [capturingShortcut, setCapturingShortcut] = useState(false);
   const [shortcutTestHit, setShortcutTestHit] = useState(false);
 
   // Optional Whisper API key (Groq or OpenAI)
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('aztec_red_apikey') || '');
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('voice8a_apikey') || '');
   const [apiProvider, setApiProvider] = useState<'groq' | 'openai'>(
-    () => (localStorage.getItem('aztec_red_provider') as 'groq' | 'openai') || 'groq'
+    () => (localStorage.getItem('voice8a_provider') as 'groq' | 'openai') || 'groq'
   );
 
   // History
   const [history, setHistory] = useState<HistoryEntry[]>(() => {
     try {
-      const saved = localStorage.getItem('aztec_red_history');
+      const saved = localStorage.getItem('voice8a_history');
       return saved ? JSON.parse(saved) : INITIAL_HISTORY;
     } catch {
       return INITIAL_HISTORY;
@@ -210,7 +210,7 @@ export function App() {
   // Dictionary
   const [dictionary, setDictionary] = useState<DictionaryEntry[]>(() => {
     try {
-      const saved = localStorage.getItem('aztec_red_dict');
+      const saved = localStorage.getItem('voice8a_dict');
       return saved ? JSON.parse(saved) : INITIAL_DICTIONARY;
     } catch {
       return INITIAL_DICTIONARY;
@@ -242,7 +242,7 @@ export function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('aztec_red_history', JSON.stringify(history));
+      localStorage.setItem('voice8a_history', JSON.stringify(history));
     } catch {
       // ignore
     }
@@ -250,21 +250,21 @@ export function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('aztec_red_dict', JSON.stringify(dictionary));
+      localStorage.setItem('voice8a_dict', JSON.stringify(dictionary));
     } catch {
       // ignore
     }
   }, [dictionary]);
 
   useEffect(() => {
-    localStorage.setItem('aztec_red_apikey', apiKey);
-    localStorage.setItem('aztec_red_provider', apiProvider);
+    localStorage.setItem('voice8a_apikey', apiKey);
+    localStorage.setItem('voice8a_provider', apiProvider);
   }, [apiKey, apiProvider]);
 
   // Sync shortcut with Electron main process on boot
   useEffect(() => {
-    if (window.aztecDesktop?.setShortcut) {
-      window.aztecDesktop.setShortcut(shortcut).then((res) => {
+    if (window.voice8aDesktop?.setShortcut) {
+      window.voice8aDesktop.setShortcut(shortcut).then((res) => {
         setShortcutOk(res.ok);
       });
     }
@@ -272,8 +272,8 @@ export function App() {
 
   // Subscribe to Electron global shortcut IPC
   useEffect(() => {
-    if (!window.aztecDesktop?.onToggleDictation) return;
-    const unsub = window.aztecDesktop.onToggleDictation(() => {
+    if (!window.voice8aDesktop?.onToggleDictation) return;
+    const unsub = window.voice8aDesktop.onToggleDictation(() => {
       setShortcutTestHit(true);
       setTimeout(() => setShortcutTestHit(false), 1800);
       toggleDictationRef.current();
@@ -290,14 +290,14 @@ export function App() {
         if (!acc) return;
         setCapturingShortcut(false);
         setShortcut(acc);
-        localStorage.setItem('aztec_red_shortcut', acc);
-        if (window.aztecDesktop?.setShortcut) {
-          window.aztecDesktop.setShortcut(acc).then((res) => setShortcutOk(res.ok));
+        localStorage.setItem('voice8a_shortcut', acc);
+        if (window.voice8aDesktop?.setShortcut) {
+          window.voice8aDesktop.setShortcut(acc).then((res) => setShortcutOk(res.ok));
         }
         return;
       }
 
-      if (!window.aztecDesktop?.isElectron) {
+      if (!window.voice8aDesktop?.isElectron) {
         const acc = keyEventToAccelerator(e);
         if (acc && acc.toLowerCase() === shortcut.toLowerCase()) {
           e.preventDefault();
@@ -450,8 +450,8 @@ export function App() {
     }
 
     // 2. Otherwise try Windows local System.Speech via Electron IPC
-    if (!transcribed && window.aztecDesktop?.transcribeWav) {
-      const res = await window.aztecDesktop.transcribeWav(wavBuffer, selectedLang);
+    if (!transcribed && window.voice8aDesktop?.transcribeWav) {
+      const res = await window.voice8aDesktop.transcribeWav(wavBuffer, selectedLang);
       if (res.ok && res.text) {
         transcribed = res.text;
       }
@@ -532,7 +532,7 @@ export function App() {
 
   const exportMeetingMarkdown = () => {
     const md = [
-      '# Transcripción de Reunión — Aztec Voice',
+      '# Transcripción de Reunión — Voice8a',
       '',
       ...meetingNotes.map((n) => `- **[${n.time}] ${n.speaker}:** ${n.text}`),
     ].join('\n');
@@ -572,13 +572,13 @@ export function App() {
         <div className="brand-header">
           <div className="brand-logo-wrap">
             <img
-              src="./assets/aztec_logo_icon.png"
-              alt="Aztec Voice"
+              src="./assets/voice8a_logo_icon.png"
+              alt="Voice8a"
               className="brand-logo-img"
             />
           </div>
           <div>
-            <div className="brand-title">Aztec Voice</div>
+            <div className="brand-title">Voice8a</div>
             <div className="brand-sub">Edición Roja · v1.9.5</div>
           </div>
         </div>
@@ -1152,7 +1152,7 @@ export function App() {
             <header className="page-header">
               <div>
                 <h1 className="page-title">Instrucciones</h1>
-                <p className="page-desc">Cómo usar Aztec Voice Edición Roja en Windows.</p>
+                <p className="page-desc">Cómo usar Voice8a Edición Roja en Windows.</p>
               </div>
             </header>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1195,11 +1195,11 @@ export function App() {
             <div className="card">
               <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14 }}>
                 <div className="brand-logo-wrap" style={{ width: 48, height: 48 }}>
-                  <img src="./assets/aztec_logo_icon.png" alt="Aztec Voice" className="brand-logo-img" style={{ width: 32, height: 32 }} />
+                  <img src="./assets/voice8a_logo_icon.png" alt="Voice8a" className="brand-logo-img" style={{ width: 32, height: 32 }} />
                 </div>
                 <div>
                   <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--brand-dark)' }}>
-                    Aztec Voice — Edición Roja v1.9.5
+                    Voice8a v1.9.5
                   </div>
                   <div style={{ fontSize: 13, color: 'var(--brand-muted)' }}>
                     Electron + React + Audio WAV + Windows Speech / Whisper

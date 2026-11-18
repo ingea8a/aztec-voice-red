@@ -102,7 +102,7 @@ body {
   width: 24px;
   height: 24px;
   object-fit: contain;
-  /* Shift green Aztec logo toward vibrant crimson-red */
+  /* Shift green Voice8a logo toward vibrant crimson-red */
   filter: hue-rotate(230deg) saturate(1.8) brightness(1.05);
 }
 

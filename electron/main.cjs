@@ -28,7 +28,7 @@ function registerAppShortcut(accelerator) {
     const ok = globalShortcut.register(accelerator, () => {
       if (mainWindow) {
         if (!mainWindow.isVisible()) mainWindow.show();
-        mainWindow.webContents.send('aztec:toggle-dictation');
+        mainWindow.webContents.send('voice8a:toggle-dictation');
       }
     });
     currentShortcut = accelerator;
@@ -47,7 +47,7 @@ function transcribeWavWithWindowsSpeech(wavBuffer, lang) {
       return;
     }
 
-    const tmpWav = path.join(os.tmpdir(), `aztec-voice-${Date.now()}.wav`);
+    const tmpWav = path.join(os.tmpdir(), `voice8a-${Date.now()}.wav`);
     fs.writeFileSync(tmpWav, Buffer.from(wavBuffer));
 
     const culture = lang === 'en' ? 'en-US' : 'es-MX';
@@ -96,14 +96,14 @@ function transcribeWavWithWindowsSpeech(wavBuffer, lang) {
 }
 
 function createWindow() {
-  const iconPath = path.join(__dirname, '..', 'public', 'assets', 'aztec_logo_icon.png');
+  const iconPath = path.join(__dirname, '..', 'public', 'assets', 'voice8a_logo_icon.png');
 
   mainWindow = new BrowserWindow({
     width: 1120,
     height: 760,
     minWidth: 820,
     minHeight: 580,
-    title: 'Aztec Voice — Edición Roja',
+    title: 'Voice8a',
     backgroundColor: '#fdf9f9',
     icon: iconPath,
     autoHideMenuBar: true,
@@ -125,14 +125,14 @@ function createWindow() {
 }
 
 function createTray() {
-  const iconPath = path.join(__dirname, '..', 'public', 'assets', 'aztec_logo_icon.png');
+  const iconPath = path.join(__dirname, '..', 'public', 'assets', 'voice8a_logo_icon.png');
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 });
   tray = new Tray(icon);
-  tray.setToolTip('Aztec Voice — Edición Roja');
+  tray.setToolTip('Voice8a');
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: 'Abrir Aztec Voice',
+      label: 'Abrir Voice8a',
       click: () => {
         if (mainWindow) {
           mainWindow.show();
@@ -145,7 +145,7 @@ function createTray() {
       click: () => {
         if (mainWindow) {
           mainWindow.show();
-          mainWindow.webContents.send('aztec:toggle-dictation');
+          mainWindow.webContents.send('voice8a:toggle-dictation');
         }
       },
     },
@@ -182,16 +182,16 @@ app.whenReady().then(() => {
   createTray();
   registerAppShortcut(currentShortcut);
 
-  ipcMain.handle('aztec:get-shortcut-status', () => ({
+  ipcMain.handle('voice8a:get-shortcut-status', () => ({
     ok: shortcutRegistered,
     shortcut: currentShortcut,
   }));
 
-  ipcMain.handle('aztec:set-shortcut', (_event, accelerator) => {
+  ipcMain.handle('voice8a:set-shortcut', (_event, accelerator) => {
     return registerAppShortcut(accelerator);
   });
 
-  ipcMain.handle('aztec:transcribe-wav', async (_event, payload) => {
+  ipcMain.handle('voice8a:transcribe-wav', async (_event, payload) => {
     return transcribeWavWithWindowsSpeech(payload.wavBuffer, payload.lang || 'es');
   });
 
