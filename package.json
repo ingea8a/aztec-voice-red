@@ -1,7 +1,7 @@
 {
   "name": "aztec-voice-red",
   "private": true,
-  "version": "1.9.4",
+  "version": "1.9.5",
   "description": "Aztec Voice Edición Roja — App de escritorio para Windows",
   "author": "ingea8a",
   "main": "electron/main.cjs",

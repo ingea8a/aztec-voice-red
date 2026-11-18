@@ -10,6 +10,7 @@ import {
   Keyboard,
   Mic,
   MicOff,
+  Play,
   Plus,
   Search,
   Settings,
@@ -19,6 +20,21 @@ import {
   Volume2,
   BookMarked,
 } from 'lucide-react';
+
+declare global {
+  interface Window {
+    aztecDesktop?: {
+      isElectron?: boolean;
+      onToggleDictation: (cb: () => void) => () => void;
+      getShortcutStatus: () => Promise<{ ok: boolean; shortcut: string }>;
+      setShortcut: (acc: string) => Promise<{ ok: boolean; shortcut: string; error?: string }>;
+      transcribeWav: (
+        wavBuffer: ArrayBuffer,
+        lang: string
+      ) => Promise<{ ok: boolean; text?: string; error?: string }>;
+    };
+  }
+}
 
 type SectionId =
   | 'home'
@@ -38,6 +54,7 @@ interface HistoryEntry {
   timestamp: string;
   durationSec: number;
   language: string;
+  audioUrl?: string;
 }
 
 interface DictionaryEntry {
@@ -74,7 +91,7 @@ const INITIAL_HISTORY: HistoryEntry[] = [
   {
     id: 'h-3',
     type: 'writing',
-    text: 'Resumen de captura: arquitectura modular con Tauri 2 + React + Whisper local.',
+    text: 'Resumen de captura: arquitectura modular con Electron + React + Voz.',
     timestamp: 'Ayer, 18:30',
     durationSec: 4,
     language: 'es',
@@ -83,8 +100,7 @@ const INITIAL_HISTORY: HistoryEntry[] = [
 
 const INITIAL_DICTIONARY: DictionaryEntry[] = [
   { id: 'd-1', term: 'Aztec Voice', replacement: 'Aztec Voice', note: 'Nombre de producto' },
-  { id: 'd-2', term: 'Whisper', replacement: 'Whisper Large v3', note: 'Modelo local' },
-  { id: 'd-3', term: 'Tauri', replacement: 'Tauri v2', note: 'Framework de escritorio' },
+  { id: 'd-2', term: 'Whisper', replacement: 'Whisper Large v3', note: 'Modelo de voz' },
 ];
 
 const INITIAL_MEETING: MeetingNote[] = [
@@ -92,21 +108,63 @@ const INITIAL_MEETING: MeetingNote[] = [
     id: 'm-1',
     speaker: 'Participante 1',
     time: '00:12',
-    text: 'Revisamos el estado del lanzamiento v1.9.4 y la nueva paleta rojiza.',
-  },
-  {
-    id: 'm-2',
-    speaker: 'Participante 2',
-    time: '00:48',
-    text: 'La latencia de transcripción local bajó a menos de 400 ms en pruebas.',
+    text: 'Revisamos el estado del lanzamiento v1.9.5 y la nueva paleta rojiza.',
   },
 ];
 
-const DEMO_PHRASES = [
-  'Hola, esta es una prueba de dictado en Aztec Voice Edición Roja.',
-  'Generar resumen ejecutivo de la reunión semanal y enviarlo por correo.',
-  'Agregar soporte para atajos globales con Control más Espacio en Linux y Windows.',
-];
+function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const targetRate = 16000;
+  const ratio = sampleRate / targetRate;
+  const newLength = Math.max(1, Math.floor(samples.length / ratio));
+  const buffer = new ArrayBuffer(44 + newLength * 2);
+  const view = new DataView(buffer);
+
+  const writeStr = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + newLength * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, targetRate, true);
+  view.setUint32(28, targetRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, newLength * 2, true);
+
+  let offset = 44;
+  for (let i = 0; i < newLength; i++) {
+    const idx = Math.min(samples.length - 1, Math.floor(i * ratio));
+    const s = Math.max(-1, Math.min(1, samples[idx]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    offset += 2;
+  }
+  return buffer;
+}
+
+function keyEventToAccelerator(e: KeyboardEvent): string | null {
+  const ignored = ['Control', 'Shift', 'Alt', 'Meta'];
+  if (ignored.includes(e.key)) return null;
+  const parts: string[] = [];
+  if (e.ctrlKey || e.metaKey) parts.push('CommandOrControl');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+
+  let key = e.key;
+  if (e.code === 'Space' || key === ' ') key = 'Space';
+  else if (key.length === 1) key = key.toUpperCase();
+  parts.push(key);
+  return parts.join('+');
+}
+
+function formatAcceleratorLabel(acc: string): string {
+  return acc.replace('CommandOrControl', 'Ctrl').replace(/\+/g, ' + ');
+}
 
 export function App() {
   const [section, setSection] = useState<SectionId>('home');
@@ -114,12 +172,27 @@ export function App() {
 
   // Dictation state
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [liveText, setLiveText] = useState('');
-  const [pushToTalk, setPushToTalk] = useState(true);
+  const [micLevels, setMicLevels] = useState<number[]>([8, 8, 8, 8, 8, 8, 8, 8, 8, 8]);
   const [localModelEnabled, setLocalModelEnabled] = useState(true);
   const [chimeEnabled, setChimeEnabled] = useState(true);
-  const [selectedLang, setSelectedLang] = useState('auto');
+  const [selectedLang, setSelectedLang] = useState('es');
   const [postProcess, setPostProcess] = useState(true);
+
+  // Global shortcut state
+  const [shortcut, setShortcut] = useState(() => {
+    return localStorage.getItem('aztec_red_shortcut') || 'CommandOrControl+Space';
+  });
+  const [shortcutOk, setShortcutOk] = useState(true);
+  const [capturingShortcut, setCapturingShortcut] = useState(false);
+  const [shortcutTestHit, setShortcutTestHit] = useState(false);
+
+  // Optional Whisper API key (Groq or OpenAI)
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('aztec_red_apikey') || '');
+  const [apiProvider, setApiProvider] = useState<'groq' | 'openai'>(
+    () => (localStorage.getItem('aztec_red_provider') as 'groq' | 'openai') || 'groq'
+  );
 
   // History
   const [history, setHistory] = useState<HistoryEntry[]>(() => {
@@ -153,8 +226,15 @@ export function App() {
   const [meetingNotes, setMeetingNotes] = useState<MeetingNote[]>(INITIAL_MEETING);
   const [meetingInput, setMeetingInput] = useState('');
 
-  const recognitionRef = useRef<any>(null);
+  // Audio recording refs
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const chunksRef = useRef<Float32Array[]>([]);
+  const sampleRateRef = useRef<number>(44100);
   const recordStartRef = useRef<number>(0);
+
+  const toggleDictationRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     document.documentElement.setAttribute('data-red-theme', redTheme);
@@ -164,7 +244,7 @@ export function App() {
     try {
       localStorage.setItem('aztec_red_history', JSON.stringify(history));
     } catch {
-      // ignore storage errors
+      // ignore
     }
   }, [history]);
 
@@ -172,9 +252,65 @@ export function App() {
     try {
       localStorage.setItem('aztec_red_dict', JSON.stringify(dictionary));
     } catch {
-      // ignore storage errors
+      // ignore
     }
   }, [dictionary]);
+
+  useEffect(() => {
+    localStorage.setItem('aztec_red_apikey', apiKey);
+    localStorage.setItem('aztec_red_provider', apiProvider);
+  }, [apiKey, apiProvider]);
+
+  // Sync shortcut with Electron main process on boot
+  useEffect(() => {
+    if (window.aztecDesktop?.setShortcut) {
+      window.aztecDesktop.setShortcut(shortcut).then((res) => {
+        setShortcutOk(res.ok);
+      });
+    }
+  }, []);
+
+  // Subscribe to Electron global shortcut IPC
+  useEffect(() => {
+    if (!window.aztecDesktop?.onToggleDictation) return;
+    const unsub = window.aztecDesktop.onToggleDictation(() => {
+      setShortcutTestHit(true);
+      setTimeout(() => setShortcutTestHit(false), 1800);
+      toggleDictationRef.current();
+    });
+    return unsub;
+  }, []);
+
+  // Browser fallback shortcut (only when NOT in Electron, to avoid double-triggering)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (capturingShortcut) {
+        e.preventDefault();
+        const acc = keyEventToAccelerator(e);
+        if (!acc) return;
+        setCapturingShortcut(false);
+        setShortcut(acc);
+        localStorage.setItem('aztec_red_shortcut', acc);
+        if (window.aztecDesktop?.setShortcut) {
+          window.aztecDesktop.setShortcut(acc).then((res) => setShortcutOk(res.ok));
+        }
+        return;
+      }
+
+      if (!window.aztecDesktop?.isElectron) {
+        const acc = keyEventToAccelerator(e);
+        if (acc && acc.toLowerCase() === shortcut.toLowerCase()) {
+          e.preventDefault();
+          setShortcutTestHit(true);
+          setTimeout(() => setShortcutTestHit(false), 1800);
+          toggleDictationRef.current();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [capturingShortcut, shortcut]);
 
   // Meeting timer
   useEffect(() => {
@@ -183,30 +319,23 @@ export function App() {
     return () => clearInterval(timer);
   }, [meetingActive]);
 
-  // Global Ctrl+Space shortcut for dictation
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.code === 'Space') {
-        e.preventDefault();
-        if (!isRecording) {
-          startDictation();
-        } else if (!pushToTalk) {
-          stopDictation();
-        }
-      }
-    };
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (pushToTalk && isRecording && (e.code === 'Space' || e.key === 'Control')) {
-        stopDictation();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('keyup', onKeyUp);
-    };
-  });
+  const playChime = (freq: number) => {
+    if (!chimeEnabled) return;
+    try {
+      const ctx = new AudioContext();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.08, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.15);
+    } catch {
+      // ignore
+    }
+  };
 
   const applyDictionary = (raw: string) => {
     let out = raw;
@@ -216,63 +345,125 @@ export function App() {
         out = out.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), item.replacement);
       }
     }
+    if (postProcess && out.length > 0) {
+      out = out.charAt(0).toUpperCase() + out.slice(1);
+    }
     return out;
   };
 
-  const startDictation = () => {
-    setIsRecording(true);
-    setLiveText('');
-    recordStartRef.current = Date.now();
+  const startDictation = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const ctx = new AudioContext();
+      audioCtxRef.current = ctx;
+      sampleRateRef.current = ctx.sampleRate;
+      chunksRef.current = [];
 
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(2048, 1, 1);
+      processorRef.current = processor;
 
-    if (SpeechRecognition) {
-      try {
-        const rec = new SpeechRecognition();
-        rec.lang = selectedLang === 'en' ? 'en-US' : 'es-MX';
-        rec.interimResults = true;
-        rec.continuous = true;
-        rec.onresult = (event: any) => {
-          let transcript = '';
-          for (let i = 0; i < event.results.length; i++) {
-            transcript += event.results[i][0].transcript;
-          }
-          setLiveText(transcript);
-        };
-        rec.onerror = () => {
-          // Fallback to demo phrase if microphone permission denied
-          const demo = DEMO_PHRASES[Math.floor(Math.random() * DEMO_PHRASES.length)];
-          setLiveText(demo);
-        };
-        rec.start();
-        recognitionRef.current = rec;
-        return;
-      } catch {
-        // Fallback below
-      }
+      processor.onaudioprocess = (ev) => {
+        const input = ev.inputBuffer.getChannelData(0);
+        chunksRef.current.push(new Float32Array(input));
+        let sum = 0;
+        for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+        const rms = Math.sqrt(sum / input.length);
+        const h = Math.min(32, Math.max(6, Math.round(rms * 240)));
+        setMicLevels((prev) => [...prev.slice(1), h]);
+      };
+
+      source.connect(processor);
+      processor.connect(ctx.destination);
+
+      recordStartRef.current = Date.now();
+      setIsRecording(true);
+      setLiveText('Grabando audio del micrófono... habla ahora y vuelve a presionar para transcribir.');
+      playChime(580);
+    } catch (err) {
+      setLiveText(`No se pudo acceder al micrófono: ${String(err)}`);
     }
-
-    // Simulated live dictation when Web Speech API is unavailable
-    const demo = DEMO_PHRASES[Math.floor(Math.random() * DEMO_PHRASES.length)];
-    setLiveText(demo);
   };
 
-  const stopDictation = () => {
+  const stopDictation = async () => {
     setIsRecording(false);
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // ignore
-      }
-      recognitionRef.current = null;
+    setMicLevels([8, 8, 8, 8, 8, 8, 8, 8, 8, 8]);
+    playChime(420);
+
+    try {
+      processorRef.current?.disconnect();
+      audioCtxRef.current?.close();
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    } catch {
+      // ignore
     }
 
-    const finalRaw =
-      liveText.trim() || DEMO_PHRASES[Math.floor(Math.random() * DEMO_PHRASES.length)];
-    const finalText = applyDictionary(finalRaw);
+    const totalLen = chunksRef.current.reduce((acc, c) => acc + c.length, 0);
+    if (totalLen === 0) {
+      setLiveText('No se capturó audio. Intenta hablar más cerca del micrófono.');
+      return;
+    }
+
+    const merged = new Float32Array(totalLen);
+    let offset = 0;
+    for (const c of chunksRef.current) {
+      merged.set(c, offset);
+      offset += c.length;
+    }
+
+    const wavBuffer = encodeWav(merged, sampleRateRef.current);
+    const wavBlob = new Blob([wavBuffer], { type: 'audio/wav' });
+    const audioUrl = URL.createObjectURL(wavBlob);
     const duration = Math.max(1, Math.round((Date.now() - recordStartRef.current) / 1000));
+
+    setIsTranscribing(true);
+    setLiveText('Transcribiendo audio...');
+
+    let transcribed = '';
+
+    // 1. If user provided Groq or OpenAI API Key, use Whisper API
+    if (apiKey.trim()) {
+      try {
+        const endpoint =
+          apiProvider === 'groq'
+            ? 'https://api.groq.com/openai/v1/audio/transcriptions'
+            : 'https://api.openai.com/v1/audio/transcriptions';
+        const model = apiProvider === 'groq' ? 'whisper-large-v3-turbo' : 'whisper-1';
+        const form = new FormData();
+        form.append('file', wavBlob, 'audio.wav');
+        form.append('model', model);
+        if (selectedLang !== 'auto') form.append('language', selectedLang);
+
+        const resp = await fetch(endpoint, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${apiKey.trim()}` },
+          body: form,
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          transcribed = (data.text || '').trim();
+        }
+      } catch {
+        // fallback to Windows local speech below
+      }
+    }
+
+    // 2. Otherwise try Windows local System.Speech via Electron IPC
+    if (!transcribed && window.aztecDesktop?.transcribeWav) {
+      const res = await window.aztecDesktop.transcribeWav(wavBuffer, selectedLang);
+      if (res.ok && res.text) {
+        transcribed = res.text;
+      }
+    }
+
+    setIsTranscribing(false);
+
+    const finalText = transcribed
+      ? applyDictionary(transcribed)
+      : 'Audio grabado correctamente (para transcripción automática en Windows configura el reconocimiento de voz de Windows o agrega tu API key gratuita de Groq en Configuración).';
+
+    setLiveText(finalText);
 
     const entry: HistoryEntry = {
       id: `h-${Date.now()}`,
@@ -281,9 +472,14 @@ export function App() {
       timestamp: 'Ahora mismo',
       durationSec: duration,
       language: selectedLang === 'auto' ? 'es' : selectedLang,
+      audioUrl,
     };
     setHistory((prev) => [entry, ...prev.slice(0, 19)]);
-    setLiveText(finalText);
+  };
+
+  toggleDictationRef.current = () => {
+    if (isRecording) stopDictation();
+    else if (!isTranscribing) startDictation();
   };
 
   const copyText = async (id: string, text: string) => {
@@ -383,7 +579,7 @@ export function App() {
           </div>
           <div>
             <div className="brand-title">Aztec Voice</div>
-            <div className="brand-sub">Edición Roja · v1.9.4</div>
+            <div className="brand-sub">Edición Roja · v1.9.5</div>
           </div>
         </div>
 
@@ -407,8 +603,13 @@ export function App() {
         <div className="sidebar-footer">
           <div className="shortcut-pill">
             <span>Atajo global</span>
-            <span className="kbd">Ctrl + Space</span>
+            <span className="kbd">{formatAcceleratorLabel(shortcut)}</span>
           </div>
+          {!shortcutOk && (
+            <div style={{ fontSize: 11, color: '#fda4af', marginTop: 6, paddingInline: 4 }}>
+              Atajo ocupado en Windows. Cámbialo en Configuración.
+            </div>
+          )}
         </div>
       </aside>
 
@@ -419,7 +620,7 @@ export function App() {
               <div>
                 <h1 className="page-title">Inicio</h1>
                 <p className="page-desc">
-                  Convierte tu voz en texto al instante con modelo local o en la nube.
+                  Convierte tu voz en texto al instante con el micrófono de tu PC.
                 </p>
               </div>
               <button
@@ -428,7 +629,7 @@ export function App() {
                 onClick={() => setSection('settings')}
               >
                 <Settings size={15} />
-                Ajustes rápidos
+                Atajo y ajustes
               </button>
             </header>
 
@@ -438,22 +639,21 @@ export function App() {
                   <span className={`status-dot ${isRecording ? 'recording' : ''}`} />
                   <span>
                     {isRecording
-                      ? 'Escuchando micrófono...'
-                      : localModelEnabled
-                        ? 'Modelo local listo (Whisper)'
-                        : 'Modo nube listo'}
+                      ? 'Grabando micrófono...'
+                      : isTranscribing
+                        ? 'Transcribiendo...'
+                        : apiKey.trim()
+                          ? `Whisper (${apiProvider.toUpperCase()}) listo`
+                          : 'Motor local de Windows listo'}
                   </span>
                 </div>
 
                 <div className="waveform" aria-hidden="true">
-                  {[14, 24, 18, 30, 20, 28, 16, 26, 22, 14].map((h, i) => (
+                  {micLevels.map((h, i) => (
                     <span
                       key={i}
                       className={`wave-bar ${isRecording ? 'active' : ''}`}
-                      style={{
-                        height: `${isRecording ? h : 8}px`,
-                        animationDelay: `${i * 0.08}s`,
-                      }}
+                      style={{ height: `${isRecording ? h : 8}px` }}
                     />
                   ))}
                 </div>
@@ -461,10 +661,11 @@ export function App() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={isRecording ? stopDictation : startDictation}
+                  disabled={isTranscribing}
+                  onClick={() => toggleDictationRef.current()}
                 >
                   {isRecording ? <MicOff size={16} /> : <Mic size={16} />}
-                  {isRecording ? 'Detener dictado' : 'Iniciar dictado'}
+                  {isRecording ? 'Detener y transcribir' : 'Iniciar dictado'}
                 </button>
               </div>
 
@@ -484,7 +685,7 @@ export function App() {
               >
                 <span>
                   {liveText ||
-                    'Presiona "Iniciar dictado" o mantén Ctrl + Space para transcribir tu voz.'}
+                    `Presiona "Iniciar dictado" o ${formatAcceleratorLabel(shortcut)} para grabar tu voz.`}
                 </span>
                 {liveText && (
                   <button
@@ -594,6 +795,7 @@ export function App() {
                             color: 'var(--brand-muted)',
                             display: 'flex',
                             gap: 12,
+                            alignItems: 'center',
                           }}
                         >
                           <span>{item.timestamp}</span>
@@ -602,6 +804,16 @@ export function App() {
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                        {item.audioUrl && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            onClick={() => new Audio(item.audioUrl).play()}
+                            title="Escuchar grabación"
+                          >
+                            <Play size={15} />
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="btn btn-ghost"
@@ -725,13 +937,13 @@ export function App() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 10 }}>
                 <input
                   className="input"
-                  placeholder="Término detectado (ej. tauri)"
+                  placeholder="Término detectado"
                   value={newTerm}
                   onChange={(e) => setNewTerm(e.target.value)}
                 />
                 <input
                   className="input"
-                  placeholder="Reemplazo exacto (ej. Tauri v2)"
+                  placeholder="Reemplazo exacto"
                   value={newReplacement}
                   onChange={(e) => setNewReplacement(e.target.value)}
                 />
@@ -778,12 +990,71 @@ export function App() {
               <div>
                 <h1 className="page-title">Configuración</h1>
                 <p className="page-desc">
-                  Personaliza atajos, idioma de transcripción, motor local y tono rojizo de la interfaz.
+                  Configura y prueba el atajo global, el motor de transcripción y el tono rojizo.
                 </p>
               </div>
             </header>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div className="card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>
+                      Atajo global de dictado ({shortcutOk ? 'Activo en Windows' : 'Ocupado por otra app'})
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--brand-muted)', marginTop: 2 }}>
+                      Si <span className="mono">Ctrl + Space</span> está ocupado en tu PC, cámbialo por otro (ej. <span className="mono">Ctrl + Alt + Space</span> o <span className="mono">F9</span>).
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span className="kbd" style={{ background: 'var(--brand-cream)', color: 'var(--brand-dark)', padding: '6px 12px', fontSize: 13 }}>
+                      {capturingShortcut ? 'Presiona las teclas...' : formatAcceleratorLabel(shortcut)}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => setCapturingShortcut((v) => !v)}
+                    >
+                      <Keyboard size={15} />
+                      {capturingShortcut ? 'Cancelar' : 'Cambiar atajo'}
+                    </button>
+                  </div>
+                </div>
+                {shortcutTestHit && (
+                  <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: 'var(--brand-primary-soft)', color: 'var(--brand-primary-strong)', fontSize: 13, fontWeight: 600 }}>
+                    Atajo detectado correctamente ({formatAcceleratorLabel(shortcut)}).
+                  </div>
+                )}
+              </div>
+
+              <div className="card">
+                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>
+                  API Key de Whisper (Opcional — Groq gratis u OpenAI)
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--brand-muted)', marginBottom: 10 }}>
+                  Sin API key usa el reconocimiento local de Windows. Con una key de Groq/OpenAI obtienes transcripción Whisper de máxima precisión en español.
+                </div>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <select
+                    className="select"
+                    style={{ width: 150 }}
+                    value={apiProvider}
+                    onChange={(e) => setApiProvider(e.target.value as 'groq' | 'openai')}
+                  >
+                    <option value="groq">Groq Whisper</option>
+                    <option value="openai">OpenAI Whisper</option>
+                  </select>
+                  <input
+                    type="password"
+                    className="input"
+                    style={{ flex: 1, minWidth: 220 }}
+                    placeholder="gsk_... o sk-..."
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                  />
+                </div>
+              </div>
+
               <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>Paleta rojiza</div>
@@ -805,26 +1076,9 @@ export function App() {
 
               <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>Push-to-Talk (Ctrl + Space)</div>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>Habilitar motor local de Windows</div>
                   <div style={{ fontSize: 13, color: 'var(--brand-muted)' }}>
-                    Mantén presionado el atajo para grabar y suelta para transcribir.
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className={`switch ${pushToTalk ? 'on' : ''}`}
-                  onClick={() => setPushToTalk((v) => !v)}
-                  aria-label="Alternar Push to Talk"
-                >
-                  <span className="switch-thumb" />
-                </button>
-              </div>
-
-              <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>Habilitar modelo local (Whisper)</div>
-                  <div style={{ fontSize: 13, color: 'var(--brand-muted)' }}>
-                    Procesa el audio directamente en tu equipo sin enviarlo a servidores externos.
+                    Usa el reconocimiento de voz nativo de Windows cuando no hay API key.
                   </div>
                 </div>
                 <button
@@ -841,7 +1095,7 @@ export function App() {
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>Post-procesamiento inteligente</div>
                   <div style={{ fontSize: 13, color: 'var(--brand-muted)' }}>
-                    Corrige puntuación, mayúsculas y aplica tu diccionario automáticamente.
+                    Corrige mayúsculas y aplica tu diccionario automáticamente.
                   </div>
                 </div>
                 <button
@@ -875,7 +1129,7 @@ export function App() {
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>Idioma de transcripción</div>
                   <div style={{ fontSize: 13, color: 'var(--brand-muted)' }}>
-                    Selecciona detección automática o un idioma fijo.
+                    Selecciona el idioma del micrófono.
                   </div>
                 </div>
                 <select
@@ -884,10 +1138,9 @@ export function App() {
                   value={selectedLang}
                   onChange={(e) => setSelectedLang(e.target.value)}
                 >
-                  <option value="auto">Auto Detect</option>
                   <option value="es">Español</option>
                   <option value="en">English</option>
-                  <option value="pt">Português</option>
+                  <option value="auto">Auto Detect</option>
                 </select>
               </div>
             </div>
@@ -899,16 +1152,16 @@ export function App() {
             <header className="page-header">
               <div>
                 <h1 className="page-title">Instrucciones</h1>
-                <p className="page-desc">Cómo sacar el máximo provecho de Aztec Voice Edición Roja.</p>
+                <p className="page-desc">Cómo usar Aztec Voice Edición Roja en Windows.</p>
               </div>
             </header>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="card">
                 <h3 style={{ margin: '0 0 6px', fontSize: 15, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Keyboard size={16} color="var(--brand-primary-strong)" /> 1. Dictado rápido con Ctrl + Space
+                  <Keyboard size={16} color="var(--brand-primary-strong)" /> 1. Atajo global configurable
                 </h3>
                 <p style={{ margin: 0, fontSize: 13.5, color: 'var(--brand-muted)' }}>
-                  Presiona <span className="kbd" style={{ color: 'var(--brand-dark)', background: 'var(--brand-cream)' }}>Ctrl + Space</span> desde cualquier pestaña o haz clic en <strong>Iniciar dictado</strong> en Inicio.
+                  Presiona <span className="kbd" style={{ color: 'var(--brand-dark)', background: 'var(--brand-cream)' }}>{formatAcceleratorLabel(shortcut)}</span> para iniciar o detener la grabación. Puedes cambiarlo en <strong>Configuración</strong>.
                 </p>
               </div>
               <div className="card">
@@ -916,7 +1169,7 @@ export function App() {
                   <Sparkles size={16} color="var(--brand-primary-strong)" /> 2. Diccionario automático
                 </h3>
                 <p style={{ margin: 0, fontSize: 13.5, color: 'var(--brand-muted)' }}>
-                  Agrega nombres propios, siglas o términos técnicos en <strong>Diccionario</strong> para que se reemplacen automáticamente al terminar de dictar.
+                  Agrega nombres propios o siglas en <strong>Diccionario</strong> para reemplazarlos automáticamente al terminar de dictar.
                 </p>
               </div>
               <div className="card">
@@ -924,7 +1177,7 @@ export function App() {
                   <Volume2 size={16} color="var(--brand-primary-strong)" /> 3. Reuniones y exportación
                 </h3>
                 <p style={{ margin: 0, fontSize: 13.5, color: 'var(--brand-muted)' }}>
-                  Usa la sección <strong>Reuniones</strong> para llevar el registro con marcas de tiempo y descargarlo en formato <span className="mono">transcripcion.md</span>.
+                  Usa <strong>Reuniones</strong> para registrar notas con marca de tiempo y exportarlas en <span className="mono">transcripcion.md</span>.
                 </p>
               </div>
             </div>
@@ -936,7 +1189,7 @@ export function App() {
             <header className="page-header">
               <div>
                 <h1 className="page-title">Acerca de</h1>
-                <p className="page-desc">Información de versión y arquitectura del clon.</p>
+                <p className="page-desc">Información de versión.</p>
               </div>
             </header>
             <div className="card">
@@ -946,17 +1199,13 @@ export function App() {
                 </div>
                 <div>
                   <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--brand-dark)' }}>
-                    Aztec Voice — Edición Roja
+                    Aztec Voice — Edición Roja v1.9.5
                   </div>
                   <div style={{ fontSize: 13, color: 'var(--brand-muted)' }}>
-                    Basado en Aztec Voice v1.9.4 · React + TypeScript + Web Speech API
+                    Electron + React + Audio WAV + Windows Speech / Whisper
                   </div>
                 </div>
               </div>
-              <p style={{ margin: 0, fontSize: 13.5, color: 'var(--brand-muted)', lineHeight: 1.6 }}>
-                Clon fiel de la interfaz y flujos principales de Aztec Voice, adaptado con una paleta
-                carmesí/rojiza en lugar del verde esmeralda original.
-              </p>
             </div>
           </>
         )}
@@ -966,24 +1215,16 @@ export function App() {
             <header className="page-header">
               <div>
                 <h1 className="page-title">Ayuda</h1>
-                <p className="page-desc">Preguntas frecuentes y solución rápida de problemas.</p>
+                <p className="page-desc">Solución rápida de problemas.</p>
               </div>
             </header>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div className="card">
                 <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>
-                  ¿Qué pasa si mi navegador no tiene permisos de micrófono?
+                  ¿El atajo Ctrl + Space no responde?
                 </div>
                 <div style={{ fontSize: 13.5, color: 'var(--brand-muted)' }}>
-                  Si el navegador bloquea el micrófono o no soporta Web Speech API, el botón de dictado usa una frase de demostración para que puedas probar el historial y el diccionario sin bloqueos.
-                </div>
-              </div>
-              <div className="card">
-                <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>
-                  ¿Dónde se guarda mi historial y diccionario?
-                </div>
-                <div style={{ fontSize: 13.5, color: 'var(--brand-muted)' }}>
-                  Se almacenan localmente en <span className="mono">localStorage</span> dentro de tu navegador.
+                  En Windows algunas apps (como PowerToys o el selector de idioma) reservan Ctrl + Space. Ve a <strong>Configuración</strong>, haz clic en <strong>Cambiar atajo</strong> y asigna por ejemplo <span className="mono">Ctrl + Alt + Space</span> o <span className="mono">F9</span>.
                 </div>
               </div>
             </div>
